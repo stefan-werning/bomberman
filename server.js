@@ -14,44 +14,78 @@ const io         = new Server(httpServer);
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ─── Constants ───────────────────────────────────────────────────────────────
-const COLS = 15, ROWS = 15, T = 36;
+const T = 36;
 const EMPTY = 0, WALL = 1, BLOCK = 2;
 const TICK_RATE = 25; // ticks/second
+const DISCONNECT_TIMEOUT_LOBBY = 10_000;  // 10 s Karenzzeit in der Lobby
+const DISCONNECT_TIMEOUT_GAME  = 30_000;  // 30 s Karenzzeit im Spiel
 const HB = T * 0.38;
-
-const SPAWNS = [
-  { tx: 1,        ty: 1        },
-  { tx: COLS - 2, ty: 1        },
-  { tx: 1,        ty: ROWS - 2 },
-  { tx: COLS - 2, ty: ROWS - 2 },
-];
+const MAX_PLAYERS = 16;
 
 const COLORS = [
-  { body: '#2277ee', head: '#ffddb0' },
-  { body: '#dd2222', head: '#ffaaaa' },
-  { body: '#22aa44', head: '#aaffaa' },
-  { body: '#ddaa22', head: '#ffeebb' },
+  { body: '#2277ee', head: '#ffddb0' }, // blau
+  { body: '#dd2222', head: '#ffaaaa' }, // rot
+  { body: '#22aa44', head: '#aaffaa' }, // grün
+  { body: '#ddaa22', head: '#ffeebb' }, // gelb
+  { body: '#aa22dd', head: '#ddaaff' }, // lila
+  { body: '#22dddd', head: '#aaffff' }, // cyan
+  { body: '#dd6622', head: '#ffcc99' }, // orange
+  { body: '#dd2299', head: '#ffaadd' }, // pink
+  { body: '#6699ff', head: '#ccddff' }, // hellblau
+  { body: '#99dd22', head: '#ddff99' }, // limette
+  { body: '#ff6688', head: '#ffccdd' }, // lachs
+  { body: '#22ddaa', head: '#aaffee' }, // türkis
+  { body: '#885511', head: '#ddbb88' }, // braun
+  { body: '#888822', head: '#ffffaa' }, // olive
+  { body: '#8822aa', head: '#cc88ff' }, // dunkelviolett
+  { body: '#228888', head: '#88eeff' }, // petrol
 ];
+
+// Spielfeldgröße abhängig von Spieleranzahl (immer ungerade für Wandraster)
+function getGridSize(n) {
+  if (n <= 4) return { cols: 15, rows: 15 };
+  if (n <= 8) return { cols: 19, rows: 19 };
+  return { cols: 25, rows: 25 };
+}
+
+// Startpositionen gleichmäßig verteilt; Ecken zuerst, dann Kanten, dann Innen
+function getSpawns(cols, rows) {
+  if (cols === 15) return [
+    { tx: 1,  ty: 1  }, { tx: 13, ty: 1  },
+    { tx: 1,  ty: 13 }, { tx: 13, ty: 13 },
+  ];
+  if (cols === 19) return [
+    { tx: 1,  ty: 1  }, { tx: 17, ty: 1  }, { tx: 1,  ty: 17 }, { tx: 17, ty: 17 },
+    { tx: 9,  ty: 1  }, { tx: 1,  ty: 9  }, { tx: 17, ty: 9  }, { tx: 9,  ty: 17 },
+  ];
+  // 25x25: 4×4-Raster, Ecken → Außenkanten → Innenpunkte
+  return [
+    { tx: 1,  ty: 1  }, { tx: 23, ty: 1  }, { tx: 1,  ty: 23 }, { tx: 23, ty: 23 },
+    { tx: 7,  ty: 1  }, { tx: 17, ty: 1  }, { tx: 1,  ty: 7  }, { tx: 1,  ty: 17 },
+    { tx: 23, ty: 7  }, { tx: 23, ty: 17 }, { tx: 7,  ty: 23 }, { tx: 17, ty: 23 },
+    { tx: 7,  ty: 7  }, { tx: 17, ty: 7  }, { tx: 7,  ty: 17 }, { tx: 17, ty: 17 },
+  ];
+}
 
 // ─── Global state ────────────────────────────────────────────────────────────
 let session   = null;
 let tunnelUrl = null;
 
 // ─── Grid ────────────────────────────────────────────────────────────────────
-function buildGrid(numPlayers) {
-  const g = Array.from({ length: ROWS }, () => new Array(COLS).fill(EMPTY));
+function buildGrid(numPlayers, cols, rows, spawns) {
+  const g = Array.from({ length: rows }, () => new Array(cols).fill(EMPTY));
 
-  for (let y = 0; y < ROWS; y++)
-    for (let x = 0; x < COLS; x++)
-      if (x === 0 || y === 0 || x === COLS - 1 || y === ROWS - 1 || (x % 2 === 0 && y % 2 === 0))
+  for (let y = 0; y < rows; y++)
+    for (let x = 0; x < cols; x++)
+      if (x === 0 || y === 0 || x === cols - 1 || y === rows - 1 || (x % 2 === 0 && y % 2 === 0))
         g[y][x] = WALL;
 
   // Clear L-shaped safe zone around each active spawn
   const safe = new Set();
   for (let i = 0; i < numPlayers; i++) {
-    const { tx, ty } = SPAWNS[i];
-    const dx = tx < COLS / 2 ? 1 : -1;
-    const dy = ty < ROWS / 2 ? 1 : -1;
+    const { tx, ty } = spawns[i];
+    const dx = tx < cols / 2 ? 1 : -1;
+    const dy = ty < rows / 2 ? 1 : -1;
     safe.add(`${tx},${ty}`);
     for (let d = 1; d <= 2; d++) {
       safe.add(`${tx + dx * d},${ty}`);
@@ -59,8 +93,8 @@ function buildGrid(numPlayers) {
     }
   }
 
-  for (let y = 1; y < ROWS - 1; y++)
-    for (let x = 1; x < COLS - 1; x++)
+  for (let y = 1; y < rows - 1; y++)
+    for (let x = 1; x < cols - 1; x++)
       if (g[y][x] === EMPTY && !safe.has(`${x},${y}`) && Math.random() < 0.45)
         g[y][x] = BLOCK;
 
@@ -69,7 +103,7 @@ function buildGrid(numPlayers) {
 
 // ─── Game helpers ────────────────────────────────────────────────────────────
 function tileAt(x, y) {
-  if (x < 0 || y < 0 || x >= COLS || y >= ROWS) return WALL;
+  if (x < 0 || y < 0 || x >= session.cols || y >= session.rows) return WALL;
   return session.grid[y][x];
 }
 function isSolid(x, y)     { const t = tileAt(x, y); return t === WALL || t === BLOCK; }
@@ -273,14 +307,15 @@ function sessionInfo() {
     winner:    session.winner,
     shareLink: `${base}/game.html?session=${session.id}`,
     players:   [...session.players.values()].map(p => ({
-      socketId:   p.socketId,
-      name:       p.name,
-      slot:       p.slot,
-      color:      p.color,
-      alive:      p.alive,
-      maxBombs:   p.maxBombs,
-      fireRange:  p.fireRange,
-      speedLevel: p.speedLevel,
+      socketId:    p.socketId,
+      name:        p.name,
+      slot:        p.slot,
+      color:       p.color,
+      alive:       p.alive,
+      disconnected: p.disconnected || false,
+      maxBombs:    p.maxBombs,
+      fireRange:   p.fireRange,
+      speedLevel:  p.speedLevel,
     })),
   };
 }
@@ -290,18 +325,22 @@ function broadcastState() {
   const state = {
     phase:      session.phase,
     winner:     session.winner,
+    cols:       session.cols,
+    rows:       session.rows,
     grid:       session.grid ? session.grid.flat() : null,
     players:    [...session.players.values()].map(p => ({
-      socketId:   p.socketId,
-      name:       p.name,
-      slot:       p.slot,
-      color:      p.color,
+      socketId:    p.socketId,
+      name:        p.name,
+      slot:        p.slot,
+      color:       p.color,
       x: p.x, y: p.y,
-      alive:      p.alive,
-      maxBombs:   p.maxBombs,
-      activeBombs:p.activeBombs,
-      fireRange:  p.fireRange,
-      speedLevel: p.speedLevel,
+      alive:       p.alive,
+      disconnected: p.disconnected || false,
+      speed:       p.speed,
+      maxBombs:    p.maxBombs,
+      activeBombs: p.activeBombs,
+      fireRange:   p.fireRange,
+      speedLevel:  p.speedLevel,
     })),
     bombs:      session.bombs.map(b => ({ tx:b.tx, ty:b.ty, timer:b.timer, range:b.range })),
     explosions: session.explosions,
@@ -312,17 +351,32 @@ function broadcastState() {
 
 function startGame() {
   if (!session || session.phase !== 'lobby' || session.players.size === 0) return false;
+
+  // Remove players still in disconnected grace period
+  for (const [id, p] of [...session.players]) {
+    if (p.disconnected) {
+      clearTimeout(p.disconnectTimer);
+      session.players.delete(id);
+    }
+  }
+  if (session.players.size === 0) return false;
+
   session.phase  = 'playing';
   session.winner = null;
   session.bombs  = [];
   session.explosions = [];
   session.burning    = new Map();
   session.powerups   = [];
-  session.grid       = buildGrid(session.players.size);
+
+  const { cols, rows } = getGridSize(session.players.size);
+  session.cols = cols;
+  session.rows = rows;
+  const spawns = getSpawns(cols, rows);
+  session.grid = buildGrid(session.players.size, cols, rows, spawns);
 
   let slotIdx = 0;
   for (const [, player] of session.players) {
-    const spawn = SPAWNS[slotIdx % 4];
+    const spawn = spawns[slotIdx % spawns.length];
     player.x          = (spawn.tx + 0.5) * T;
     player.y          = (spawn.ty + 0.5) * T;
     player.alive      = true;
@@ -341,6 +395,25 @@ function startGame() {
   session.lastTickTime = Date.now();
   session.tickInterval = setInterval(tick, 1000 / TICK_RATE);
   return true;
+}
+
+// ─── Disconnect helpers ───────────────────────────────────────────────────────
+function expelPlayer(player) {
+  if (!session) return;
+  player.disconnectTimer = null;
+  if (session.phase === 'playing') {
+    player.alive       = false;
+    player.disconnected = false;
+  } else {
+    session.players.delete(player.socketId);
+    let i = 0;
+    for (const [, p] of session.players) { p.slot = i; p.color = COLORS[i]; i++; }
+  }
+  if (session.players.size === 0) {
+    if (session.tickInterval) clearInterval(session.tickInterval);
+    session = null;
+  }
+  io.emit('session-updated', sessionInfo());
 }
 
 // ─── Socket.IO ───────────────────────────────────────────────────────────────
@@ -376,8 +449,31 @@ io.on('connection', (socket) => {
       socket.emit('error-msg', 'Session nicht gefunden.');
       return;
     }
-    if (session.players.size >= 4) {
-      socket.emit('error-msg', 'Session ist voll (max. 4 Spieler).');
+
+    // Reconnect: restore a temporarily disconnected player by name
+    const trimmedName = (name || '').substring(0, 20);
+    const reconnecting = trimmedName
+      ? [...session.players.values()].find(p => p.disconnected && p.name === trimmedName)
+      : null;
+    if (reconnecting) {
+      clearTimeout(reconnecting.disconnectTimer);
+      session.players.delete(reconnecting.socketId);
+      reconnecting.socketId       = socket.id;
+      reconnecting.disconnected   = false;
+      reconnecting.disconnectTimer = null;
+      session.players.set(socket.id, reconnecting);
+      socket.join(`session:${session.id}`);
+      socket.emit('joined', { slot: reconnecting.slot, color: reconnecting.color, sessionId: session.id });
+      if (session.phase === 'playing') {
+        socket.emit('game-started');
+        broadcastState();
+      }
+      io.emit('session-updated', sessionInfo());
+      return;
+    }
+
+    if (session.players.size >= MAX_PLAYERS) {
+      socket.emit('error-msg', `Session ist voll (max. ${MAX_PLAYERS} Spieler).`);
       return;
     }
     if (session.phase !== 'lobby') {
@@ -457,19 +553,12 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     if (!session) return;
     if (session.players.has(socket.id)) {
-      const player = session.players.get(socket.id);
-      if (session.phase === 'playing') {
-        player.alive = false; // mark as dead, game continues
-      } else {
-        session.players.delete(socket.id);
-        // Repack slots
-        let i = 0;
-        for (const [, p] of session.players) { p.slot = i; p.color = COLORS[i]; i++; }
-      }
-      if (session.players.size === 0) {
-        if (session.tickInterval) clearInterval(session.tickInterval);
-        session = null;
-      }
+      const player  = session.players.get(socket.id);
+      const timeout = session.phase === 'playing'
+        ? DISCONNECT_TIMEOUT_GAME
+        : DISCONNECT_TIMEOUT_LOBBY;
+      player.disconnected    = true;
+      player.disconnectTimer = setTimeout(() => expelPlayer(player), timeout);
       io.emit('session-updated', sessionInfo());
     }
   });
