@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>Bomberman – Server</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background:#0d1117; color:#e6edf3;
+  font-family:'Courier New',monospace;
+  min-height:100vh; padding:32px 20px;
+  display:flex; flex-direction:column; align-items:center;
+}
+h1 { font-size:22px; letter-spacing:2px; margin-bottom:28px; color:#f0f6fc; }
+.card {
+  background:#161b22; border:1px solid #30363d; border-radius:8px;
+  padding:20px 24px; width:100%; max-width:540px; margin-bottom:16px;
+}
+.card-title { font-size:11px; color:#8b949e; text-transform:uppercase; letter-spacing:1px; margin-bottom:14px; }
+.row { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+.row:last-child { margin-bottom:0; }
+.label { color:#8b949e; font-size:13px; min-width:110px; }
+.value { color:#f0f6fc; font-size:13px; font-weight:bold; word-break:break-all; }
+.dot { width:8px; height:8px; border-radius:50%; }
+.dot.green { background:#3fb950; box-shadow:0 0 6px #3fb950; }
+.dot.grey  { background:#484f58; }
+.tag {
+  font-size:11px; padding:2px 8px; border-radius:4px;
+  background:#21262d; border:1px solid #30363d; color:#8b949e;
+}
+a.link { color:#58a6ff; text-decoration:none; font-size:12px; }
+a.link:hover { text-decoration:underline; }
+button {
+  font-family:'Courier New',monospace; font-size:13px;
+  padding:8px 18px; border-radius:6px; border:none; cursor:pointer;
+  transition:opacity .15s;
+}
+button:disabled { opacity:.4; cursor:default; }
+button:not(:disabled):hover { opacity:.85; }
+.btn-primary   { background:#238636; color:#fff; }
+.btn-secondary { background:#21262d; color:#e6edf3; border:1px solid #30363d; }
+.btn-danger    { background:#da3633; color:#fff; }
+.btn-copy {
+  font-size:11px; padding:4px 10px;
+  background:#21262d; color:#8b949e; border:1px solid #30363d; border-radius:4px;
+  cursor:pointer; font-family:inherit;
+}
+.btn-copy:hover { color:#e6edf3; }
+#share-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+#share-link { color:#58a6ff; font-size:12px; word-break:break-all; flex:1; }
+#players-list { display:flex; flex-direction:column; gap:8px; }
+.player-entry {
+  display:flex; align-items:center; gap:10px;
+  background:#21262d; border-radius:6px; padding:8px 12px;
+  font-size:13px;
+}
+.player-dot { width:10px; height:10px; border-radius:50%; flex-shrink:0; }
+.player-name { flex:1; font-weight:bold; }
+.player-slot { font-size:11px; color:#8b949e; }
+.error-msg { color:#f85149; font-size:12px; margin-top:8px; }
+.phase-badge {
+  font-size:11px; padding:3px 10px; border-radius:10px;
+  font-weight:bold; text-transform:uppercase; letter-spacing:0.5px;
+}
+.phase-lobby   { background:#21262d; color:#8b949e; border:1px solid #30363d; }
+.phase-playing { background:#1f4423; color:#3fb950; border:1px solid #2ea043; }
+.phase-ended   { background:#3d1f1f; color:#f85149; border:1px solid #6e2b2b; }
+#actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:4px; }
+</style>
+</head>
+<body>
+<h1>🎮 BOMBERMAN SERVER</h1>
+
+<!-- Status -->
+<div class="card">
+  <div class="card-title">Server Status</div>
+  <div class="row">
+    <div class="dot green"></div>
+    <span class="label">Server</span>
+    <span class="value">Online</span>
+  </div>
+  <div class="row">
+    <div class="dot" id="tunnel-dot"></div>
+    <span class="label">Öffentliche URL</span>
+    <span class="value" id="tunnel-display">Verbinde...</span>
+  </div>
+</div>
+
+<!-- Session -->
+<div class="card" id="session-card">
+  <div class="card-title" style="display:flex;align-items:center;gap:10px;">
+    Session
+    <span id="phase-badge" class="phase-badge phase-lobby" style="display:none"></span>
+  </div>
+  <div id="no-session">
+    <p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Keine aktive Session. Erstelle eine neue Session und teile den Link.</p>
+    <button class="btn-primary" id="btn-create">Neue Session erstellen</button>
+  </div>
+  <div id="has-session" style="display:none">
+    <div class="row">
+      <span class="label">Session-ID</span>
+      <span class="value" id="session-id-val"></span>
+    </div>
+    <div class="row" id="share-row">
+      <span class="label">Share-Link</span>
+      <span id="share-link">–</span>
+      <button class="btn-copy" id="btn-copy">Kopieren</button>
+    </div>
+    <div style="margin:16px 0 8px;font-size:12px;color:#8b949e;">
+      Spieler (<span id="player-count">0</span>/4)
+    </div>
+    <div id="players-list"></div>
+    <div id="error-area"></div>
+    <div id="actions" style="margin-top:16px;">
+      <button class="btn-primary"   id="btn-start"   disabled>Spiel starten</button>
+      <button class="btn-secondary" id="btn-restart" style="display:none">Neues Spiel (Lobby)</button>
+      <button class="btn-danger"    id="btn-close">Session schließen</button>
+    </div>
+    <p style="margin-top:10px;font-size:11px;color:#8b949e;">
+      Du kannst selbst mitspielen: <a class="link" id="self-join-link" href="#" target="_blank">Spiel öffnen →</a>
+    </p>
+  </div>
+</div>
+
+<!-- Winner banner -->
+<div class="card" id="winner-card" style="display:none;text-align:center;">
+  <div style="font-size:28px;margin-bottom:8px;">🏆</div>
+  <div style="font-size:18px;font-weight:bold;color:#f0f6fc;" id="winner-text"></div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const socket = io();
+
+let isHost = false;
+let currentSession = null;
+
+socket.on('server-status', ({ tunnelUrl, session }) => {
+  updateTunnel(tunnelUrl);
+  if (session) applySession(session);
+});
+
+socket.on('session-created', (session) => {
+  isHost = true;
+  applySession(session);
+});
+
+socket.on('session-updated', (session) => {
+  if (session) applySession(session);
+  else clearSession();
+});
+
+socket.on('error-msg', (msg) => {
+  document.getElementById('error-area').innerHTML =
+    `<p class="error-msg">${msg}</p>`;
+  setTimeout(() => { document.getElementById('error-area').innerHTML = ''; }, 4000);
+});
+
+socket.on('host-claimed', () => {
+  isHost = true;
+  updateActions();
+});
+
+// ── Tunnel display ─────────────────────────────────────────────────────────
+function updateTunnel(url) {
+  const dot = document.getElementById('tunnel-dot');
+  const disp = document.getElementById('tunnel-display');
+  if (url) {
+    dot.className = 'dot green';
+    disp.innerHTML = `<a class="link" href="${url}" target="_blank">${url}</a>`;
+  } else {
+    dot.className = 'dot grey';
+    disp.textContent = 'Nicht verfügbar (nur lokales Netzwerk)';
+  }
+  // Update share link if session active
+  if (currentSession) updateShareLink(currentSession.shareLink);
+}
+
+// ── Session display ────────────────────────────────────────────────────────
+function applySession(s) {
+  currentSession = s;
+  document.getElementById('no-session').style.display    = 'none';
+  document.getElementById('has-session').style.display   = '';
+  document.getElementById('winner-card').style.display   = 'none';
+  document.getElementById('session-id-val').textContent = s.id;
+  updateShareLink(s.shareLink);
+  updatePlayers(s.players);
+  updatePhase(s);
+  updateActions();
+}
+
+function clearSession() {
+  currentSession = null;
+  isHost = false;
+  document.getElementById('no-session').style.display  = '';
+  document.getElementById('has-session').style.display = 'none';
+  document.getElementById('winner-card').style.display = 'none';
+  document.getElementById('phase-badge').style.display = 'none';
+}
+
+function updateShareLink(link) {
+  const el = document.getElementById('share-link');
+  const selfJoin = document.getElementById('self-join-link');
+  if (link) {
+    el.innerHTML = `<a class="link" href="${link}" target="_blank">${link}</a>`;
+    selfJoin.href = link;
+  } else {
+    el.textContent = '–';
+  }
+}
+
+function updatePlayers(players) {
+  document.getElementById('player-count').textContent = players.length;
+  const list = document.getElementById('players-list');
+  list.innerHTML = players.length === 0
+    ? '<p style="color:#8b949e;font-size:12px;">Noch keine Spieler beigetreten.</p>'
+    : players.map(p => `
+        <div class="player-entry">
+          <div class="player-dot" style="background:${p.color.body}"></div>
+          <div class="player-name">${esc(p.name)}</div>
+          ${p.alive === false ? '<span class="tag">☠️ Tot</span>' : ''}
+          <span class="player-slot" style="color:${p.color.body}">Spieler ${p.slot + 1}</span>
+        </div>`).join('');
+}
+
+function updatePhase(s) {
+  const badge = document.getElementById('phase-badge');
+  badge.style.display = '';
+  badge.className = `phase-badge phase-${s.phase}`;
+  const labels = { lobby:'Lobby', playing:'Spiel läuft', ended:'Beendet' };
+  badge.textContent = labels[s.phase] || s.phase;
+
+  if (s.phase === 'ended') {
+    const wc = document.getElementById('winner-card');
+    const wt = document.getElementById('winner-text');
+    wc.style.display = '';
+    wt.textContent = s.winner ? `${s.winner} gewinnt!` : 'Unentschieden!';
+  }
+}
+
+function updateActions() {
+  const s = currentSession;
+  const btnStart   = document.getElementById('btn-start');
+  const btnRestart = document.getElementById('btn-restart');
+  const btnClose   = document.getElementById('btn-close');
+
+  if (!s || !isHost) {
+    btnStart.disabled = true;
+    btnRestart.style.display = 'none';
+    btnClose.style.display   = 'none';
+    return;
+  }
+
+  btnClose.style.display = '';
+
+  if (s.phase === 'lobby') {
+    btnStart.disabled        = s.players.length === 0;
+    btnStart.style.display   = '';
+    btnRestart.style.display = 'none';
+  } else if (s.phase === 'playing') {
+    btnStart.style.display   = 'none';
+    btnRestart.style.display = '';
+  } else { // ended
+    btnStart.style.display   = 'none';
+    btnRestart.style.display = '';
+  }
+}
+
+// ── Buttons ────────────────────────────────────────────────────────────────
+document.getElementById('btn-create').addEventListener('click', () => {
+  socket.emit('create-session');
+  // Try to reclaim host in case we refreshed
+  socket.emit('claim-host');
+});
+
+document.getElementById('btn-start').addEventListener('click', () => {
+  socket.emit('start-game');
+});
+
+document.getElementById('btn-restart').addEventListener('click', () => {
+  socket.emit('restart-game');
+});
+
+document.getElementById('btn-close').addEventListener('click', () => {
+  if (!confirm('Session wirklich schließen?')) return;
+  // Force-close by removing all players — server cleans up on empty
+  location.reload();
+});
+
+document.getElementById('btn-copy').addEventListener('click', () => {
+  const link = currentSession?.shareLink;
+  if (!link) return;
+  navigator.clipboard.writeText(link).then(() => {
+    const btn = document.getElementById('btn-copy');
+    btn.textContent = 'Kopiert!';
+    setTimeout(() => { btn.textContent = 'Kopieren'; }, 1500);
+  });
+});
+
+// Try to claim host on load (if admin refreshed page and session already exists)
+setTimeout(() => socket.emit('claim-host'), 500);
+
+function esc(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+</body>
+</html>

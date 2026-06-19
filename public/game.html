@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>Bomberman – Multiplayer</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background:#0d1117; color:#e6edf3;
+  font-family:'Courier New',monospace;
+  min-height:100vh; display:flex; flex-direction:column;
+  align-items:center; justify-content:center;
+  user-select:none;
+}
+
+/* ── Join / Lobby ─────────────────────────────────────────────────── */
+.panel {
+  background:#161b22; border:1px solid #30363d; border-radius:8px;
+  padding:28px 32px; min-width:320px; max-width:460px; text-align:center;
+}
+.panel h2 { font-size:18px; margin-bottom:6px; }
+.panel p  { font-size:13px; color:#8b949e; margin-bottom:20px; }
+input[type=text] {
+  width:100%; padding:10px 14px; border-radius:6px;
+  border:1px solid #30363d; background:#21262d; color:#f0f6fc;
+  font-family:'Courier New',monospace; font-size:14px; margin-bottom:12px;
+  outline:none;
+}
+input[type=text]:focus { border-color:#58a6ff; }
+button {
+  font-family:'Courier New',monospace; font-size:13px;
+  padding:9px 22px; border-radius:6px; border:none; cursor:pointer;
+  transition:opacity .15s; width:100%;
+}
+button:disabled { opacity:.4; cursor:default; }
+button:not(:disabled):hover { opacity:.85; }
+.btn-primary { background:#238636; color:#fff; }
+.error-msg { color:#f85149; font-size:12px; margin-top:8px; }
+
+.lobby-players { display:flex; flex-direction:column; gap:8px; margin:16px 0; }
+.player-entry {
+  display:flex; align-items:center; gap:10px;
+  background:#21262d; border-radius:6px; padding:8px 12px; text-align:left;
+}
+.player-dot { width:10px; height:10px; border-radius:50%; flex-shrink:0; }
+.player-name { flex:1; font-size:13px; font-weight:bold; }
+.you-badge {
+  font-size:10px; padding:2px 6px; border-radius:4px;
+  background:#1f4423; color:#3fb950; border:1px solid #2ea043;
+}
+
+/* ── HUD + Canvas ─────────────────────────────────────────────────── */
+#hud {
+  display:flex; gap:0; flex-wrap:wrap; justify-content:center;
+  margin-bottom:8px; max-width:800px;
+}
+.hud-player {
+  display:flex; align-items:center; gap:6px;
+  padding:6px 14px; background:#161b22;
+  border:1px solid #30363d; border-radius:0; font-size:12px;
+  position:relative;
+}
+.hud-player:first-child { border-radius:6px 0 0 6px; }
+.hud-player:last-child  { border-radius:0 6px 6px 0; }
+.hud-player.me { border-color:#58a6ff; background:#0d1f3c; }
+.hud-player.dead { opacity:.4; }
+.hud-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+.hud-name { font-weight:bold; max-width:80px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.hud-stats { color:#8b949e; font-size:11px; }
+canvas { display:block; border:2px solid #30363d; border-radius:0 0 4px 4px; }
+#controls { margin-top:8px; font-size:11px; color:#6e7681; }
+
+/* ── Overlays ─────────────────────────────────────────────────────── */
+#overlay {
+  position:fixed; inset:0; background:rgba(0,0,0,.7);
+  display:flex; align-items:center; justify-content:center;
+  z-index:10;
+}
+#overlay .panel { text-align:center; }
+</style>
+</head>
+<body>
+
+<!-- Join form -->
+<div class="panel" id="join-panel">
+  <h2>🎮 Bomberman</h2>
+  <p id="join-sub">Dein Name:</p>
+  <input type="text" id="name-input" placeholder="Spielername" maxlength="20" autocomplete="off">
+  <button class="btn-primary" id="btn-join">Beitreten</button>
+  <div id="join-error" class="error-msg"></div>
+</div>
+
+<!-- Lobby -->
+<div class="panel" id="lobby-panel" style="display:none">
+  <h2>⏳ Warte auf Host...</h2>
+  <p>Der Host startet das Spiel, sobald alle bereit sind.</p>
+  <div class="lobby-players" id="lobby-players"></div>
+  <p style="font-size:11px;color:#484f58;">Session: <span id="lobby-session-id"></span></p>
+</div>
+
+<!-- Game area (hidden until playing) -->
+<div id="game-area" style="display:none">
+  <div id="hud"></div>
+  <canvas id="c"></canvas>
+  <div id="controls">WASD / Pfeile: Bewegen &nbsp;|&nbsp; Leertaste: Bombe</div>
+</div>
+
+<!-- Winner overlay (shown on game end) -->
+<div id="overlay" style="display:none">
+  <div class="panel">
+    <div style="font-size:40px;margin-bottom:8px" id="overlay-icon">🏆</div>
+    <h2 id="overlay-title" style="font-size:22px;margin-bottom:8px"></h2>
+    <p id="overlay-sub">Der Host kann eine neue Runde starten.</p>
+  </div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+'use strict';
+
+// ─── Setup ────────────────────────────────────────────────────────────────────
+const COLS = 15, ROWS = 15, T = 36;
+const EMPTY = 0, WALL = 1, BLOCK = 2;
+
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+canvas.width  = COLS * T;
+canvas.height = ROWS * T;
+
+const params    = new URLSearchParams(location.search);
+const sessionId = params.get('session');
+
+const HB = T * 0.38; // hitbox half-size, must match server
+
+let mySocketId = null;
+let mySlot     = null;
+let gameState  = null;
+let keys       = { left:false, right:false, up:false, down:false, bomb:false };
+
+// ─── Client-side prediction (own player) ──────────────────────────────────────
+let predicted   = null;       // {x, y, speed, alive}
+let correction  = {x:0, y:0}; // accumulated server correction to apply gradually
+const CORR_RATE = 0.2;        // fraction of error corrected per frame (~12 frames to converge)
+
+// ─── Interpolation (remote players) ──────────────────────────────────────────
+const remoteBuffer = new Map(); // socketId → [{t, x, y, alive, name, slot, color}]
+const INTERP_DELAY = 80;        // ms behind real-time (2× server tick = smooth buffer)
+
+const socket = io();
+
+// ─── Auto-join from URL ───────────────────────────────────────────────────────
+if (!sessionId) {
+  document.getElementById('join-sub').textContent = 'Kein Session-Link gefunden. Bitte nutze den Link vom Host.';
+  document.getElementById('btn-join').disabled = true;
+  document.getElementById('name-input').disabled = true;
+} else {
+  document.getElementById('lobby-session-id').textContent = sessionId;
+}
+
+socket.on('connect', () => { mySocketId = socket.id; });
+
+// ─── Join ────────────────────────────────────────────────────────────────────
+document.getElementById('btn-join').addEventListener('click', doJoin);
+document.getElementById('name-input').addEventListener('keydown', e => { if (e.key === 'Enter') doJoin(); });
+
+function doJoin() {
+  const name = document.getElementById('name-input').value.trim();
+  if (!name) { showJoinError('Bitte gib einen Namen ein.'); return; }
+  socket.emit('join-session', { sessionId, name });
+}
+
+socket.on('joined', ({ slot, color, sessionId: sid }) => {
+  mySlot = slot;
+  document.getElementById('join-panel').style.display  = 'none';
+  document.getElementById('lobby-panel').style.display = '';
+  document.getElementById('lobby-session-id').textContent = sid;
+});
+
+socket.on('error-msg', (msg) => showJoinError(msg));
+
+function showJoinError(msg) {
+  document.getElementById('join-error').textContent = msg;
+  setTimeout(() => { document.getElementById('join-error').textContent = ''; }, 4000);
+}
+
+// ─── Session updates (lobby player list) ──────────────────────────────────────
+socket.on('session-updated', (s) => {
+  if (!s) return;
+  updateLobby(s.players);
+  if (s.phase === 'ended') showEndScreen(s.winner);
+});
+
+function updateLobby(players) {
+  const list = document.getElementById('lobby-players');
+  list.innerHTML = players.map(p => `
+    <div class="player-entry">
+      <div class="player-dot" style="background:${p.color.body}"></div>
+      <div class="player-name">${esc(p.name)}</div>
+      ${p.socketId === mySocketId ? '<span class="you-badge">Du</span>' : ''}
+    </div>`).join('');
+}
+
+// ─── Game start / restart ─────────────────────────────────────────────────────
+socket.on('game-started', () => {
+  document.getElementById('join-panel').style.display  = 'none';
+  document.getElementById('lobby-panel').style.display = 'none';
+  document.getElementById('game-area').style.display   = '';
+  document.getElementById('overlay').style.display     = 'none';
+  requestAnimationFrame(renderLoop);
+});
+
+socket.on('game-restarted', () => {
+  document.getElementById('overlay').style.display     = 'none';
+  document.getElementById('game-area').style.display   = 'none';
+  document.getElementById('lobby-panel').style.display = '';
+  gameState  = null;
+  predicted  = null;
+  correction = {x:0, y:0};
+  remoteBuffer.clear();
+});
+
+// ─── Game state ───────────────────────────────────────────────────────────────
+socket.on('game-state', (state) => {
+  const now = performance.now();
+
+  // Own-player reconciliation — find by socketId, fall back to slot
+  let serverMe = state.players.find(p => p.socketId === mySocketId);
+  if (!serverMe && mySlot !== null)
+    serverMe = state.players.find(p => p.slot === mySlot);
+  if (serverMe) mySocketId = serverMe.socketId;
+
+  // Debug – remove after fix
+  if (!serverMe || !predicted) {
+    console.log('[debug] mySocketId:', mySocketId, 'mySlot:', mySlot,
+      'players:', state.players.map(p => p.socketId + '/slot' + p.slot),
+      'serverMe:', !!serverMe, 'predicted:', !!predicted);
+  }
+
+  if (serverMe) {
+    if (!predicted) {
+      predicted = {
+        x: serverMe.x, y: serverMe.y,
+        speed: serverMe.speed, alive: serverMe.alive,
+        name: serverMe.name,
+        bodyColor: serverMe.color.body, headColor: serverMe.color.head,
+      };
+    } else {
+      const errX = serverMe.x - predicted.x;
+      const errY = serverMe.y - predicted.y;
+      if (Math.hypot(errX, errY) > 80) {
+        predicted.x = serverMe.x;
+        predicted.y = serverMe.y;
+        correction  = {x:0, y:0};
+      } else {
+        correction.x += errX;
+        correction.y += errY;
+      }
+      predicted.speed     = serverMe.speed;
+      predicted.alive     = serverMe.alive;
+      predicted.name      = serverMe.name;
+      predicted.bodyColor = serverMe.color.body;
+      predicted.headColor = serverMe.color.head;
+    }
+  }
+
+  // Remote player buffer for interpolation
+  for (const p of state.players) {
+    if (p.socketId === mySocketId) continue;
+    if (!remoteBuffer.has(p.socketId)) remoteBuffer.set(p.socketId, []);
+    const buf = remoteBuffer.get(p.socketId);
+    buf.push({ t: now, x: p.x, y: p.y, alive: p.alive, name: p.name, slot: p.slot, color: p.color });
+    if (buf.length > 30) buf.shift(); // ~1.2 s of history
+  }
+  // Remove buffers for players who left
+  for (const id of remoteBuffer.keys())
+    if (!state.players.some(p => p.socketId === id)) remoteBuffer.delete(id);
+
+  gameState = state;
+  updateHUD(state.players);
+  if (state.phase === 'ended') showEndScreen(state.winner);
+});
+
+function updateHUD(players) {
+  const hud = document.getElementById('hud');
+  hud.innerHTML = players.map(p => {
+    const isMe = p.socketId === mySocketId;
+    const cls  = `hud-player${isMe ? ' me' : ''}${!p.alive ? ' dead' : ''}`;
+    return `<div class="${cls}">
+      <div class="hud-dot" style="background:${p.color.body}"></div>
+      <div class="hud-name">${esc(p.name)}${isMe ? ' ★' : ''}</div>
+      <div class="hud-stats">&nbsp;💣${p.maxBombs} 🔥${p.fireRange} ⚡${p.speedLevel}</div>
+    </div>`;
+  }).join('');
+}
+
+function showEndScreen(winner) {
+  const ov = document.getElementById('overlay');
+  ov.style.display = '';
+  if (winner) {
+    const isMe = gameState?.players?.find(p => p.name === winner && p.socketId === mySocketId);
+    document.getElementById('overlay-icon').textContent  = isMe ? '🏆' : '😵';
+    document.getElementById('overlay-title').textContent = winner + ' gewinnt!';
+    document.getElementById('overlay-sub').textContent   = isMe ? 'Gut gemacht!' : 'Der Host kann eine neue Runde starten.';
+  } else {
+    document.getElementById('overlay-icon').textContent  = '💀';
+    document.getElementById('overlay-title').textContent = 'Unentschieden';
+    document.getElementById('overlay-sub').textContent   = 'Der Host kann eine neue Runde starten.';
+  }
+}
+
+// ─── Input ────────────────────────────────────────────────────────────────────
+window.addEventListener('keydown', e => {
+  const changed = setKey(e.key, true);
+  if (e.key === ' ') e.preventDefault();
+  if (changed) socket.emit('input-update', keys);
+});
+window.addEventListener('keyup', e => {
+  const changed = setKey(e.key, false);
+  if (changed) socket.emit('input-update', keys);
+});
+
+function setKey(key, val) {
+  const map = {
+    ArrowLeft:'left', a:'left', A:'left',
+    ArrowRight:'right', d:'right', D:'right',
+    ArrowUp:'up', w:'up', W:'up',
+    ArrowDown:'down', s:'down', S:'down',
+    ' ':'bomb',
+  };
+  const k = map[key];
+  if (!k) return false;
+  if (keys[k] === val) return false;
+  keys[k] = val;
+  return true;
+}
+
+// ─── Sound ───────────────────────────────────────────────────────────────────
+let _ac = null;
+function getAC() {
+  if (!_ac) _ac = new AudioContext();
+  if (_ac.state === 'suspended') _ac.resume();
+  return _ac;
+}
+socket.on('sound', ({ type }) => snd(type));
+
+function snd(type) {
+  try {
+    const a = getAC(), t = a.currentTime;
+    if (type === 'place') {
+      const o = a.createOscillator(), g = a.createGain();
+      o.connect(g); g.connect(a.destination);
+      o.frequency.setValueAtTime(110, t);
+      o.frequency.exponentialRampToValueAtTime(55, t+0.13);
+      g.gain.setValueAtTime(0.25, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t+0.15);
+      o.start(t); o.stop(t+0.15);
+    } else if (type === 'boom') {
+      const len = a.sampleRate * 0.4, buf = a.createBuffer(1, len, a.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = (Math.random()*2-1)*Math.pow(1-i/len,1.2);
+      const src = a.createBufferSource(), filt = a.createBiquadFilter(), g = a.createGain();
+      filt.type = 'lowpass'; filt.frequency.value = 500;
+      src.buffer = buf; src.connect(filt); filt.connect(g); g.connect(a.destination);
+      g.gain.setValueAtTime(0.7, t); g.gain.exponentialRampToValueAtTime(0.001, t+0.45);
+      src.start(t); src.stop(t+0.45);
+    } else if (type === 'pickup') {
+      [0,1,2].forEach(i => {
+        const o = a.createOscillator(), g = a.createGain();
+        o.connect(g); g.connect(a.destination);
+        o.type = 'square'; o.frequency.value = [440,550,660][i];
+        const st = t + i*0.07;
+        g.gain.setValueAtTime(0.12, st); g.gain.exponentialRampToValueAtTime(0.001, st+0.09);
+        o.start(st); o.stop(st+0.09);
+      });
+    } else if (type === 'die') {
+      const o = a.createOscillator(), g = a.createGain();
+      o.connect(g); g.connect(a.destination);
+      o.type = 'sawtooth'; o.frequency.setValueAtTime(380, t);
+      o.frequency.exponentialRampToValueAtTime(80, t+0.65);
+      g.gain.setValueAtTime(0.3, t); g.gain.exponentialRampToValueAtTime(0.001, t+0.65);
+      o.start(t); o.stop(t+0.65);
+    } else if (type === 'win') {
+      [0,1,2,3,4].forEach(i => {
+        const o = a.createOscillator(), g = a.createGain();
+        o.connect(g); g.connect(a.destination);
+        o.type = 'square'; o.frequency.value = [330,440,440,550,660][i];
+        const st = t + i*0.1;
+        g.gain.setValueAtTime(0.15, st); g.gain.exponentialRampToValueAtTime(0.001, st+0.12);
+        o.start(st); o.stop(st+0.12);
+      });
+    }
+  } catch(e) { /* AudioContext blocked */ }
+}
+
+// ─── Client physics (mirrors server, used for own-player prediction) ──────────
+function pTileAt(x, y) {
+  if (!gameState?.grid || x < 0 || y < 0 || x >= COLS || y >= ROWS) return WALL;
+  return gameState.grid[y * COLS + x];
+}
+function pIsSolid(x, y) { const t = pTileAt(x, y); return t === WALL || t === BLOCK; }
+function pHasBomb(x, y) { return gameState?.bombs?.some(b => b.tx === x && b.ty === y) ?? false; }
+
+function pCollidesAt(ent, px, py) {
+  for (const cx of [px - HB, px + HB]) {
+    for (const cy of [py - HB, py + HB]) {
+      const tx = Math.floor(cx / T), ty = Math.floor(cy / T);
+      if (pIsSolid(tx, ty)) return true;
+      if (pHasBomb(tx, ty)) {
+        const overlaps = ent.x + HB > tx*T && ent.x - HB < (tx+1)*T &&
+                         ent.y + HB > ty*T && ent.y - HB < (ty+1)*T;
+        if (!overlaps) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function pTryMove(ent, dx, dy, dt) {
+  const spd = ent.speed * dt;
+  if (!pCollidesAt(ent, ent.x + dx*spd, ent.y)) ent.x += dx*spd;
+  if (!pCollidesAt(ent, ent.x, ent.y + dy*spd)) ent.y += dy*spd;
+  const SNAP = T * 0.45;
+  if (dx !== 0) {
+    const cy = Math.round((ent.y - T/2) / T) * T + T/2;
+    const d  = cy - ent.y;
+    if (Math.abs(d) > 0.5 && Math.abs(d) < SNAP) {
+      const step = Math.sign(d) * Math.min(Math.abs(d), spd);
+      if (!pCollidesAt(ent, ent.x, ent.y + step)) ent.y += step;
+    }
+  }
+  if (dy !== 0) {
+    const cx = Math.round((ent.x - T/2) / T) * T + T/2;
+    const d  = cx - ent.x;
+    if (Math.abs(d) > 0.5 && Math.abs(d) < SNAP) {
+      const step = Math.sign(d) * Math.min(Math.abs(d), spd);
+      if (!pCollidesAt(ent, ent.x + step, ent.y)) ent.x += step;
+    }
+  }
+}
+
+// ─── Remote player interpolation ─────────────────────────────────────────────
+function getInterpolated(now) {
+  const renderTime = now - INTERP_DELAY;
+  const result = [];
+  for (const [socketId, buf] of remoteBuffer) {
+    if (!buf.length) continue;
+    // Find the two buffered snapshots that bracket renderTime
+    let prev = buf[0], next = buf[0];
+    for (let i = 1; i < buf.length; i++) {
+      if (buf[i].t <= renderTime) prev = buf[i];
+      else { next = buf[i]; break; }
+    }
+    if (prev === next || next.t === prev.t) {
+      result.push({ ...prev, socketId });
+    } else {
+      const alpha = Math.max(0, Math.min(1, (renderTime - prev.t) / (next.t - prev.t)));
+      result.push({
+        socketId,
+        x:     prev.x + (next.x - prev.x) * alpha,
+        y:     prev.y + (next.y - prev.y) * alpha,
+        alive: next.alive,
+        name:  next.name, slot: next.slot, color: next.color,
+      });
+    }
+  }
+  return result;
+}
+
+// ─── Rendering ────────────────────────────────────────────────────────────────
+const C = {
+  floorA:'#1e3520', floorB:'#192d1b',
+  wall:'#4a4a6a', wallH:'#6a6a9a',
+  block:'#7a4a1a', blockF:'#b87840',
+  bomb:'#111111', fuse:'#ffaa00',
+  expA:'#ff6600', expB:'#ffff55',
+  puBomb:'#ff4455', puFire:'#ff8800', puSpeed:'#33ffaa',
+};
+
+function fill(c, x, y, w, h) { ctx.fillStyle = c; ctx.fillRect(x, y, w, h); }
+
+let lastFrameTs = 0;
+
+function renderLoop(ts) {
+  const dt = Math.min((ts - lastFrameTs) / 1000, 0.05);
+  lastFrameTs = ts;
+
+  // Advance own player prediction at full frame-rate
+  if (predicted && predicted.alive && gameState?.phase === 'playing') {
+    // Bleed off accumulated server correction gradually
+    const cx = correction.x * CORR_RATE;
+    const cy = correction.y * CORR_RATE;
+    correction.x -= cx;
+    correction.y -= cy;
+    predicted.x  += cx;
+    predicted.y  += cy;
+
+    // Apply current key input through the same physics as the server
+    let dx = 0, dy = 0;
+    if (keys.left)  dx = -1;
+    if (keys.right) dx =  1;
+    if (keys.up)    dy = -1;
+    if (keys.down)  dy =  1;
+    if (dx !== 0)   dy =  0;
+    pTryMove(predicted, dx, dy, dt);
+  }
+
+  if (gameState) draw(ts);
+  requestAnimationFrame(renderLoop);
+}
+
+function draw(ts) {
+  const st = gameState;
+  if (!st || !st.grid) return;
+
+  // Tiles
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      const px = x*T, py = y*T;
+      const t = st.grid[y * COLS + x];
+      if (t === WALL) {
+        fill(C.wall, px, py, T, T);
+        fill(C.wallH, px+1, py+1, T-2, T-3);
+      } else if (t === BLOCK) {
+        fill(C.block, px, py, T, T);
+        fill(C.blockF, px+1, py+1, T-2, T-3);
+        ctx.strokeStyle = C.block; ctx.lineWidth = 1;
+        ctx.strokeRect(px+4, py+4, T-8, T-8);
+      } else {
+        fill((x+y)%2 ? C.floorB : C.floorA, px, py, T, T);
+      }
+    }
+  }
+
+  // Powerups
+  const puCol = { bomb:C.puBomb, fire:C.puFire, speed:C.puSpeed };
+  for (const pu of st.powerups) {
+    const px = pu.x*T, py = pu.y*T;
+    const pulse = 0.5 + 0.5*Math.sin(ts * 0.005);
+    ctx.strokeStyle = puCol[pu.type];
+    ctx.lineWidth = 2 + pulse*2;
+    ctx.strokeRect(px+2, py+2, T-4, T-4);
+    fill(puCol[pu.type], px+4, py+4, T-8, T-8);
+    ctx.fillStyle = 'rgba(255,255,255,0.22)';
+    ctx.fillRect(px+4, py+4, T-8, (T-8)*0.4);
+    drawPuIcon(px+T/2, py+T/2, pu.type);
+  }
+
+  // Bombs
+  for (const b of st.bombs) {
+    const cx = b.tx*T+T/2, cy = b.ty*T+T/2;
+    const pulse = 0.92 + Math.sin(b.timer*10)*0.08;
+    const r = T*0.38*pulse;
+    ctx.fillStyle = 'rgba(0,0,0,0.28)';
+    ctx.beginPath(); ctx.ellipse(cx+1, cy+T*0.1, r*0.8, r*0.22, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = C.bomb;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.17)';
+    ctx.beginPath(); ctx.arc(cx-r*0.28, cy-r*0.28, r*0.32, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = C.fuse; ctx.lineWidth = 2; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(cx+r*0.5, cy-r*0.5);
+    ctx.quadraticCurveTo(cx+r*0.95, cy-r*0.95, cx+r*0.45, cy-r*1.4);
+    ctx.stroke();
+    if (b.timer < 1.5 && Math.floor(b.timer*8)%2 === 0) {
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(cx+r*0.45, cy-r*1.4, 3, 0, Math.PI*2); ctx.fill();
+    }
+  }
+
+  // Explosions
+  for (const e of st.explosions) {
+    const a = e.timer / 0.8;
+    ctx.globalAlpha = a;
+    fill(C.expA, e.x*T, e.y*T, T, T);
+    fill(C.expB, e.x*T+T*0.22, e.y*T+T*0.22, T*0.56, T*0.56);
+    ctx.globalAlpha = 1;
+  }
+
+  // Remote players: render at interpolated position (INTERP_DELAY ms behind)
+  const now = performance.now();
+  for (const p of getInterpolated(now)) {
+    if (!p.alive) continue;
+    drawChar(p.x, p.y, p.color.body, p.color.head, p.name, false);
+  }
+
+  // Own player: prediction first, fall back to raw server position
+  const myServer = st.players.find(p => p.slot === mySlot)
+                ?? st.players.find(p => p.socketId === mySocketId);
+  if (predicted?.alive) {
+    drawChar(predicted.x, predicted.y, predicted.bodyColor, predicted.headColor, predicted.name, true);
+  } else if (myServer?.alive) {
+    drawChar(myServer.x, myServer.y, myServer.color.body, myServer.color.head, myServer.name, true);
+  }
+}
+
+function drawChar(cx, cy, bc, hc, name, isMe) {
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.22)';
+  ctx.beginPath();
+  ctx.ellipse(cx, cy+T*0.44, T*0.3, T*0.09, 0, 0, Math.PI*2);
+  ctx.fill();
+  // Body
+  fill(bc, cx-T*0.32, cy-T*0.08, T*0.64, T*0.5);
+  // Head
+  ctx.fillStyle = hc;
+  ctx.beginPath(); ctx.arc(cx, cy-T*0.2, T*0.26, 0, Math.PI*2); ctx.fill();
+  // Eyes
+  ctx.fillStyle = '#222';
+  ctx.beginPath();
+  ctx.arc(cx-T*0.1, cy-T*0.23, T*0.055, 0, Math.PI*2);
+  ctx.arc(cx+T*0.1, cy-T*0.23, T*0.055, 0, Math.PI*2);
+  ctx.fill();
+  // "Me" ring
+  if (isMe) {
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([3, 3]);
+    ctx.strokeRect(cx-T*0.35, cy-T*0.5, T*0.7, T);
+    ctx.setLineDash([]);
+  }
+  // Name label
+  ctx.font = `bold ${T*0.28}px monospace`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillText(name, cx+1, cy-T*0.46+1);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(name, cx, cy-T*0.46);
+}
+
+function drawPuIcon(cx, cy, type) {
+  const s = T * 0.22;
+  ctx.save();
+  if (type === 'bomb') {
+    const r = s;
+    ctx.fillStyle='rgba(0,0,0,0.35)';
+    ctx.beginPath(); ctx.ellipse(cx+1,cy+s*0.55,r*0.8,r*0.25,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='#111';
+    ctx.beginPath(); ctx.arc(cx,cy+s*0.15,r,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='rgba(255,255,255,0.2)';
+    ctx.beginPath(); ctx.arc(cx-r*0.3,cy-r*0.18+s*0.15,r*0.33,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle='#fa0'; ctx.lineWidth=1.5; ctx.lineCap='round';
+    ctx.beginPath();
+    ctx.moveTo(cx+r*0.55,cy-r*0.4+s*0.15);
+    ctx.quadraticCurveTo(cx+r,cy-r+s*0.15,cx+r*0.48,cy-r*1.4+s*0.15);
+    ctx.stroke();
+  } else if (type === 'fire') {
+    ctx.fillStyle='#ff5500';
+    ctx.beginPath();
+    ctx.moveTo(cx,cy+s*1.1);
+    ctx.bezierCurveTo(cx-s*1.1,cy+s*0.2,cx-s*0.85,cy-s*1.2,cx,cy-s*1.6);
+    ctx.bezierCurveTo(cx+s*0.85,cy-s*1.2,cx+s*1.1,cy+s*0.2,cx,cy+s*1.1);
+    ctx.fill();
+    ctx.fillStyle='#ffaa00';
+    ctx.beginPath();
+    ctx.moveTo(cx,cy+s*0.7);
+    ctx.bezierCurveTo(cx-s*0.65,cy+s*0.1,cx-s*0.5,cy-s*0.9,cx,cy-s*1.15);
+    ctx.bezierCurveTo(cx+s*0.5,cy-s*0.9,cx+s*0.65,cy+s*0.1,cx,cy+s*0.7);
+    ctx.fill();
+    ctx.fillStyle='#ffee66';
+    ctx.beginPath();
+    ctx.moveTo(cx,cy+s*0.3);
+    ctx.bezierCurveTo(cx-s*0.3,cy-s*0.2,cx-s*0.25,cy-s*0.65,cx,cy-s*0.75);
+    ctx.bezierCurveTo(cx+s*0.25,cy-s*0.65,cx+s*0.3,cy-s*0.2,cx,cy+s*0.3);
+    ctx.fill();
+  } else if (type === 'speed') {
+    ctx.fillStyle='#fff';
+    ctx.beginPath();
+    ctx.moveTo(cx+s*0.45,cy-s*1.4); ctx.lineTo(cx-s*0.45,cy-s*0.05);
+    ctx.lineTo(cx+s*0.18,cy-s*0.05); ctx.lineTo(cx-s*0.45,cy+s*1.4);
+    ctx.lineTo(cx+s*0.45,cy+s*0.05); ctx.lineTo(cx-s*0.18,cy+s*0.05);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+</body>
+</html>
