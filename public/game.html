@@ -364,6 +364,24 @@ function snd(type) {
         g.gain.setValueAtTime(0.15, st); g.gain.exponentialRampToValueAtTime(0.001, st+0.12);
         o.start(st); o.stop(st+0.12);
       });
+    } else if (type === 'shrink-warn') {
+      [0,1,2].forEach(i => {
+        const o = a.createOscillator(), g = a.createGain();
+        o.connect(g); g.connect(a.destination);
+        o.type = 'square'; o.frequency.value = 880;
+        const ts2 = t + i * 0.2;
+        g.gain.setValueAtTime(0.2, ts2); g.gain.exponentialRampToValueAtTime(0.001, ts2 + 0.12);
+        o.start(ts2); o.stop(ts2 + 0.12);
+      });
+    } else if (type === 'shrink') {
+      const len = a.sampleRate * 0.5, buf = a.createBuffer(1, len, a.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = (Math.random()*2-1) * Math.pow(1 - i/len, 0.6);
+      const src = a.createBufferSource(), filt = a.createBiquadFilter(), g = a.createGain();
+      filt.type = 'lowpass'; filt.frequency.value = 200;
+      src.buffer = buf; src.connect(filt); filt.connect(g); g.connect(a.destination);
+      g.gain.setValueAtTime(0.6, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+      src.start(t); src.stop(t + 0.5);
     }
   } catch(e) { /* AudioContext blocked */ }
 }
@@ -416,12 +434,20 @@ function draw(ts) {
   const st = gameState;
   if (!st || !st.grid) return;
 
+  const bord      = st.shrinkBorder    || 0;
+  const maxBord   = st.maxShrinkBorder || 0;
+  const shrinkIn  = st.shrinkIn ?? null;
+  const isWarning = shrinkIn !== null && shrinkIn <= 3500 && bord < maxBord;
+
   // Tiles
   for (let y = 0; y < ROWS; y++) {
     for (let x = 0; x < COLS; x++) {
       const px = x*T, py = y*T;
       const t = st.grid[y * COLS + x];
-      if (t === WALL) {
+      const isDead = x < bord || x >= COLS - bord || y < bord || y >= ROWS - bord;
+      if (isDead) {
+        fill('#0c0606', px, py, T, T);
+      } else if (t === WALL) {
         fill(C.wall, px, py, T, T);
         fill(C.wallH, px+1, py+1, T-2, T-3);
       } else if (t === BLOCK) {
@@ -433,6 +459,19 @@ function draw(ts) {
         fill((x+y)%2 ? C.floorB : C.floorA, px, py, T, T);
       }
     }
+  }
+
+  // Danger zone overlay (pulsing red ring on cells that will be consumed next)
+  if (isWarning) {
+    const pulse = 0.5 + 0.5 * Math.sin(ts * 0.01);
+    ctx.fillStyle = `rgba(255,60,0,${(0.3 + 0.25 * pulse).toFixed(2)})`;
+    const activeW = (COLS - 2 * bord) * T;
+    const activeH = (ROWS - 2 * bord) * T;
+    const ox = bord * T, oy = bord * T;
+    ctx.fillRect(ox,                  oy,                  activeW, T);
+    ctx.fillRect(ox,                  oy + activeH - T,    activeW, T);
+    ctx.fillRect(ox,                  oy + T,              T, activeH - 2 * T);
+    ctx.fillRect(ox + activeW - T,    oy + T,              T, activeH - 2 * T);
   }
 
   // Powerups
@@ -492,6 +531,20 @@ function draw(ts) {
       p.color.body, p.color.head, p.name,
       p.socketId === mySocketId,
     );
+  }
+
+  // Shrink countdown text (on top of everything)
+  if (isWarning) {
+    const secs = Math.ceil(shrinkIn / 1000);
+    ctx.save();
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'top';
+    ctx.font         = 'bold 16px monospace';
+    ctx.fillStyle    = 'rgba(0,0,0,0.75)';
+    ctx.fillText(`⚠ Spielfeld schrumpft in ${secs}s!`, canvas.width / 2 + 1, 7);
+    ctx.fillStyle = '#ff6600';
+    ctx.fillText(`⚠ Spielfeld schrumpft in ${secs}s!`, canvas.width / 2, 6);
+    ctx.restore();
   }
 }
 

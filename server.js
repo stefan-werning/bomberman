@@ -101,6 +101,57 @@ function buildGrid(numPlayers, cols, rows, spawns) {
   return g;
 }
 
+// ─── Field shrink ────────────────────────────────────────────────────────────
+function findFreeSpot(minX, minY, maxX, maxY) {
+  const occupied = new Set(
+    [...session.players.values()]
+      .filter(p => p.alive)
+      .map(p => `${Math.floor(p.x/T)},${Math.floor(p.y/T)}`)
+  );
+  const free = [];
+  for (let y = minY; y <= maxY; y++)
+    for (let x = minX; x <= maxX; x++)
+      if (session.grid[y][x] === EMPTY && !hasBomb(x, y) && !occupied.has(`${x},${y}`))
+        free.push({ x, y });
+  if (!free.length) return null;
+  return free[Math.floor(Math.random() * free.length)];
+}
+
+function doShrink() {
+  const border = session.shrinkBorder;
+  const cols = session.cols, rows = session.rows;
+
+  for (let x = border; x < cols - border; x++) {
+    session.grid[border][x] = WALL;
+    session.grid[rows - 1 - border][x] = WALL;
+  }
+  for (let y = border + 1; y < rows - border - 1; y++) {
+    session.grid[y][border] = WALL;
+    session.grid[y][cols - 1 - border] = WALL;
+  }
+
+  session.shrinkBorder++;
+  const nb = session.shrinkBorder;
+
+  session.bombs      = session.bombs.filter(b  => b.tx >= nb && b.tx < cols-nb && b.ty >= nb && b.ty < rows-nb);
+  session.powerups   = session.powerups.filter(pu => pu.x >= nb && pu.x < cols-nb && pu.y >= nb && pu.y < rows-nb);
+  session.explosions = session.explosions.filter(e  => e.x  >= nb && e.x  < cols-nb && e.y  >= nb && e.y  < rows-nb);
+  for (const [key, entry] of session.burning)
+    if (entry.x < nb || entry.x >= cols-nb || entry.y < nb || entry.y >= rows-nb)
+      session.burning.delete(key);
+
+  for (const [, player] of session.players) {
+    if (!player.alive) continue;
+    const ptx = Math.floor(player.x / T), pty = Math.floor(player.y / T);
+    if (isSolid(ptx, pty)) {
+      const spot = findFreeSpot(nb, nb, cols - 1 - nb, rows - 1 - nb);
+      if (spot) { player.x = (spot.x + 0.5) * T; player.y = (spot.y + 0.5) * T; }
+    }
+  }
+
+  emitSound('shrink');
+}
+
 // ─── Game helpers ────────────────────────────────────────────────────────────
 function tileAt(x, y) {
   if (x < 0 || y < 0 || x >= session.cols || y >= session.rows) return WALL;
@@ -206,6 +257,21 @@ function tick() {
   const now = Date.now();
   const dt  = Math.min((now - session.lastTickTime) / 1000, 0.05);
   session.lastTickTime = now;
+
+  // Field shrink check
+  if (session.shrinkBorder < session.maxShrinkBorder) {
+    if (!session.shrinkWarningSent && now >= session.nextShrinkTime - 3000) {
+      session.shrinkWarningSent = true;
+      emitSound('shrink-warn');
+    }
+    if (now >= session.nextShrinkTime) {
+      doShrink();
+      if (session.shrinkBorder < session.maxShrinkBorder) {
+        session.nextShrinkTime  = now + 60000;
+        session.shrinkWarningSent = false;
+      }
+    }
+  }
 
   // Move players & place bombs
   for (const [, player] of session.players) {
@@ -345,6 +411,11 @@ function broadcastState() {
     bombs:      session.bombs.map(b => ({ tx:b.tx, ty:b.ty, timer:b.timer, range:b.range })),
     explosions: session.explosions,
     powerups:   session.powerups,
+    shrinkBorder:    session.shrinkBorder    ?? 0,
+    maxShrinkBorder: session.maxShrinkBorder ?? 0,
+    shrinkIn:        (session.maxShrinkBorder > 0 && session.shrinkBorder < session.maxShrinkBorder)
+                       ? Math.max(0, session.nextShrinkTime - Date.now())
+                       : null,
   };
   io.to(`session:${session.id}`).emit('game-state', state);
 }
@@ -392,7 +463,11 @@ function startGame() {
     slotIdx++;
   }
 
-  session.lastTickTime = Date.now();
+  session.lastTickTime    = Date.now();
+  session.shrinkBorder    = 1;
+  session.maxShrinkBorder = Math.floor((Math.min(cols, rows) - 3) / 2);
+  session.nextShrinkTime  = Date.now() + 60000;
+  session.shrinkWarningSent = false;
   session.tickInterval = setInterval(tick, 1000 / TICK_RATE);
   return true;
 }
@@ -527,7 +602,11 @@ io.on('connection', (socket) => {
     session.explosions = [];
     session.burning = new Map();
     session.powerups = [];
-    session.tickInterval = null;
+    session.tickInterval    = null;
+    session.shrinkBorder    = 0;
+    session.maxShrinkBorder = 0;
+    session.nextShrinkTime  = null;
+    session.shrinkWarningSent = false;
     io.to(`session:${session.id}`).emit('game-restarted');
     io.emit('session-updated', sessionInfo());
   });
