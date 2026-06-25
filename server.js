@@ -178,24 +178,79 @@ function collidesAt(ent, px, py) {
 
 function tryMove(ent, dx, dy, dt) {
   const spd = ent.speed * dt;
-  if (!collidesAt(ent, ent.x + dx * spd, ent.y)) ent.x += dx * spd;
-  if (!collidesAt(ent, ent.x, ent.y + dy * spd)) ent.y += dy * spd;
+  const canMoveX = dx !== 0 && !collidesAt(ent, ent.x + dx * spd, ent.y);
+  const canMoveY = dy !== 0 && !collidesAt(ent, ent.x, ent.y + dy * spd);
 
-  const SNAP = T * 0.45;
+  if (canMoveX) ent.x += dx * spd;
+  if (canMoveY) ent.y += dy * spd;
+
   if (dx !== 0) {
-    const cy = Math.round((ent.y - T / 2) / T) * T + T / 2;
-    const d  = cy - ent.y;
-    if (Math.abs(d) > 0.5 && Math.abs(d) < SNAP) {
-      const step = Math.sign(d) * Math.min(Math.abs(d), spd);
-      if (!collidesAt(ent, ent.x, ent.y + step)) ent.y += step;
+    const ftx    = Math.floor((ent.x + dx * T * 0.6) / T);
+    const curTy  = Math.floor(ent.y / T);
+    const tileCy = curTy * T + T / 2;
+    const d      = tileCy - ent.y;
+
+    if (canMoveX) {
+      // Freier Weg: sanft zur Korridor-Mitte snappen — nur bei Ecken sinnvoll
+      if (Math.abs(d) > 0.5 &&
+          (!isSolid(ftx, curTy) || !isSolid(ftx, curTy - 1) || !isSolid(ftx, curTy + 1))) {
+        const step = Math.sign(d) * Math.min(Math.abs(d), spd);
+        if (!collidesAt(ent, ent.x, ent.y + step)) ent.y += step;
+      }
+    } else {
+      // Blockiert: wandberührende Reihe aus Bounding-Box bestimmen
+      const topRow = Math.floor((ent.y - HB) / T);
+      const botRow = Math.floor((ent.y + HB) / T);
+      const blockRow = tileAt(ftx, topRow) === WALL ? topRow
+                     : tileAt(ftx, botRow) === WALL ? botRow : null;
+      if (blockRow !== null) {
+        // Offene Korridore über/unter der Wand prüfen
+        const aboveOpen = !isSolid(ftx, blockRow - 1) && !hasBomb(ftx, blockRow - 1);
+        const belowOpen = !isSolid(ftx, blockRow + 1) && !hasBomb(ftx, blockRow + 1);
+        if (aboveOpen || belowOpen) {
+          // Ziel: Mitte des offenen Korridors — dieser Anker ändert sich nie mid-navigation
+          const aboveTarget = (blockRow - 1) * T + T / 2;
+          const belowTarget = (blockRow + 1) * T + T / 2;
+          const targetY = (aboveOpen && belowOpen)
+            ? (Math.abs(ent.y - aboveTarget) <= Math.abs(ent.y - belowTarget) ? aboveTarget : belowTarget)
+            : (aboveOpen ? aboveTarget : belowTarget);
+          const step = Math.sign(targetY - ent.y) * spd;
+          if (step !== 0 && !collidesAt(ent, ent.x, ent.y + step)) ent.y += step;
+        }
+      }
     }
   }
+
   if (dy !== 0) {
-    const cx = Math.round((ent.x - T / 2) / T) * T + T / 2;
-    const d  = cx - ent.x;
-    if (Math.abs(d) > 0.5 && Math.abs(d) < SNAP) {
-      const step = Math.sign(d) * Math.min(Math.abs(d), spd);
-      if (!collidesAt(ent, ent.x + step, ent.y)) ent.x += step;
+    const fty    = Math.floor((ent.y + dy * T * 0.6) / T);
+    const curTx  = Math.floor(ent.x / T);
+    const tileCx = curTx * T + T / 2;
+    const d      = tileCx - ent.x;
+
+    if (canMoveY) {
+      if (Math.abs(d) > 0.5 &&
+          (!isSolid(curTx, fty) || !isSolid(curTx - 1, fty) || !isSolid(curTx + 1, fty))) {
+        const step = Math.sign(d) * Math.min(Math.abs(d), spd);
+        if (!collidesAt(ent, ent.x + step, ent.y)) ent.x += step;
+      }
+    } else {
+      const leftCol  = Math.floor((ent.x - HB) / T);
+      const rightCol = Math.floor((ent.x + HB) / T);
+      const blockCol = tileAt(leftCol,  fty) === WALL ? leftCol
+                     : tileAt(rightCol, fty) === WALL ? rightCol : null;
+      if (blockCol !== null) {
+        const leftOpen  = !isSolid(blockCol - 1, fty) && !hasBomb(blockCol - 1, fty);
+        const rightOpen = !isSolid(blockCol + 1, fty) && !hasBomb(blockCol + 1, fty);
+        if (leftOpen || rightOpen) {
+          const leftTarget  = (blockCol - 1) * T + T / 2;
+          const rightTarget = (blockCol + 1) * T + T / 2;
+          const targetX = (leftOpen && rightOpen)
+            ? (Math.abs(ent.x - leftTarget) <= Math.abs(ent.x - rightTarget) ? leftTarget : rightTarget)
+            : (leftOpen ? leftTarget : rightTarget);
+          const step = Math.sign(targetX - ent.x) * spd;
+          if (step !== 0 && !collidesAt(ent, ent.x + step, ent.y)) ent.x += step;
+        }
+      }
     }
   }
 }
@@ -208,6 +263,170 @@ function addExp(x, y) {
 
 function emitSound(type) {
   if (session) io.to(`session:${session.id}`).emit('sound', { type });
+}
+
+// ─── Bot AI (portiert von Singleplayer-Gegner-KI) ────────────────────────────
+function botIsBlastPath(tx, ty, bomb) {
+  if (bomb.tx === tx && bomb.ty === ty) return true;
+  for (const [ddx, ddy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+    for (let i = 1; i <= bomb.range; i++) {
+      const ex = bomb.tx + ddx * i, ey = bomb.ty + ddy * i;
+      const t = tileAt(ex, ey);
+      if (t === WALL) break;
+      if (ex === tx && ey === ty) return true;
+      if (t === BLOCK) break;
+    }
+  }
+  return false;
+}
+
+function botThreatens(tx, ty, thresh) {
+  if (hasExplosion(tx, ty)) return true;
+  return session.bombs.some(b => b.timer < thresh && botIsBlastPath(tx, ty, b));
+}
+
+function botHasSafeEscape(etx, ety, bx, by, range) {
+  const fake = { tx: bx, ty: by, range };
+  const visited = new Set([`${etx},${ety}`]);
+  let frontier = [{ x: etx, y: ety }];
+  for (let d = 0; d < range + 2; d++) {
+    const next = [];
+    for (const pos of frontier) {
+      for (const [ddx, ddy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        const nx = pos.x + ddx, ny = pos.y + ddy, k = `${nx},${ny}`;
+        if (visited.has(k) || isSolid(nx, ny) || hasBomb(nx, ny)) continue;
+        visited.add(k);
+        if (!botIsBlastPath(nx, ny, fake) && !botThreatens(nx, ny, 3.5)) return true;
+        next.push({ x: nx, y: ny });
+      }
+    }
+    frontier = next;
+    if (!frontier.length) break;
+  }
+  return false;
+}
+
+// BFS: nächsten sicheren Tile finden, ersten Schritt dorthin zurückgeben.
+// extraBomb: gerade gelegte Bombe, die noch nicht in session.bombs ist.
+function botFindSafeTile(etx, ety, extraBomb) {
+  const dangerous = (tx, ty) => {
+    if (hasExplosion(tx, ty)) return true;
+    if (session.bombs.some(b => b.timer < 4.0 && botIsBlastPath(tx, ty, b))) return true;
+    if (extraBomb && botIsBlastPath(tx, ty, extraBomb)) return true;
+    return false;
+  };
+  const visited = new Set([`${etx},${ety}`]);
+  const queue = [{ x: etx, y: ety, dir: null }];
+  while (queue.length) {
+    const { x, y, dir } = queue.shift();
+    for (const [ddx, ddy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+      const nx = x + ddx, ny = y + ddy, k = `${nx},${ny}`;
+      if (visited.has(k) || isSolid(nx, ny) || hasBomb(nx, ny)) continue;
+      visited.add(k);
+      const firstDir = dir ?? [ddx, ddy];
+      if (!dangerous(nx, ny)) return firstDir;
+      queue.push({ x: nx, y: ny, dir: firstDir });
+    }
+  }
+  return null;
+}
+
+function tickBot(bot, dt) {
+  if (!bot.ai) bot.ai = {
+    dir: { x: 1, y: 0 },
+    dirTimer:  0,
+    bombTimer: 2 + Math.random() * 2,
+    fleeing:   0,
+  };
+  const ai = bot.ai;
+
+  ai.dirTimer  -= dt;
+  ai.bombTimer -= dt;
+  if (ai.fleeing > 0) ai.fleeing -= dt;
+
+  const etx = Math.floor(bot.x / T), ety = Math.floor(bot.y / T);
+
+  // Nächsten lebenden Gegner suchen
+  let target = null, targetDist = Infinity;
+  for (const [, p] of session.players) {
+    if (p.socketId === bot.socketId || !p.alive) continue;
+    const d = Math.abs(Math.floor(p.x/T) - etx) + Math.abs(Math.floor(p.y/T) - ety);
+    if (d < targetDist) { targetDist = d; target = { x: Math.floor(p.x/T), y: Math.floor(p.y/T) }; }
+  }
+
+  // In Gefahr → Flucht erzwingen, sofort neu planen
+  const inDanger = botThreatens(etx, ety, 3.5);
+  if (inDanger) ai.fleeing = Math.max(ai.fleeing, 3.0);
+
+  // Bombe legen: nur wenn nicht flüchtend, Kapazität frei, Gegner nah, Fluchtweg vorhanden
+  bot.keys.bomb = false;
+  let justPlacedBomb = null;
+  if (ai.bombTimer <= 0 && ai.fleeing <= 0 && bot.activeBombs < bot.maxBombs) {
+    ai.bombTimer = 2.5 + Math.random() * 2;
+    if (target && targetDist <= 4 && botHasSafeEscape(etx, ety, etx, ety, bot.fireRange)) {
+      bot.keys.bomb   = true;
+      ai.fleeing      = 3.4;
+      // Bombe noch nicht in session.bombs → als extra übergeben
+      justPlacedBomb  = { tx: etx, ty: ety, range: bot.fireRange, timer: 3.0 };
+    }
+  }
+
+  // Richtung neu berechnen: beim Flüchten alle 0.1 s, sonst alle 0.2–0.5 s
+  if (ai.dirTimer <= 0 || inDanger || justPlacedBomb) {
+    if (ai.fleeing > 0) {
+      // BFS zum nächsten sicheren Tile
+      const escapeDir = botFindSafeTile(etx, ety, justPlacedBomb);
+      if (escapeDir) {
+        ai.dir = { x: escapeDir[0], y: escapeDir[1] };
+      } else {
+        // Notfall: blast-bewusste Richtung wählen
+        let set = false;
+        for (const [ddx, ddy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+          const nx = etx + ddx, ny = ety + ddy;
+          if (!isSolid(nx, ny) && !hasBomb(nx, ny) && !hasExplosion(nx, ny) &&
+              !botThreatens(nx, ny, 4.0)) {
+            ai.dir = { x: ddx, y: ddy }; set = true; break;
+          }
+        }
+        if (!set) {
+          for (const [ddx, ddy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+            const nx = etx + ddx, ny = ety + ddy;
+            if (!isSolid(nx, ny) && !hasBomb(nx, ny) && !hasExplosion(nx, ny)) {
+              ai.dir = { x: ddx, y: ddy }; break;
+            }
+          }
+        }
+      }
+      ai.dirTimer = 0.1;
+    } else {
+      ai.dirTimer = 0.2 + Math.random() * 0.3;
+      const opts = [];
+      for (const [ddx, ddy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        const nx = etx + ddx, ny = ety + ddy;
+        if (isSolid(nx, ny) || hasBomb(nx, ny)) continue;
+        if (hasExplosion(nx, ny)) continue; // Feuer niemals betreten
+        let score = 0;
+        // Weiche Strafe für Bomben-Gefahrenzone
+        for (const b of session.bombs)
+          if (b.timer < 3.0 && botIsBlastPath(nx, ny, b)) score += 300;
+        if (target)
+          score += (Math.abs(nx - target.x) + Math.abs(ny - target.y)) * 10;
+        opts.push({ ddx, ddy, score });
+      }
+      if (opts.length > 0) {
+        opts.sort((a, b) => a.score - b.score);
+        const pick = Math.random() < 0.65
+          ? opts[0]
+          : opts[Math.floor(Math.random() * opts.length)];
+        ai.dir = { x: pick.ddx, y: pick.ddy };
+      }
+    }
+  }
+
+  bot.keys.left  = ai.dir.x < 0;
+  bot.keys.right = ai.dir.x > 0;
+  bot.keys.up    = ai.dir.y < 0;
+  bot.keys.down  = ai.dir.y > 0;
 }
 
 function explodeBomb(bomb) {
@@ -272,6 +491,10 @@ function tick() {
       }
     }
   }
+
+  // Update bot AI (sets keys before movement is processed)
+  for (const [, player] of session.players)
+    if (player.isBot && player.alive) tickBot(player, dt);
 
   // Move players & place bombs
   for (const [, player] of session.players) {
@@ -379,6 +602,7 @@ function sessionInfo() {
       color:       p.color,
       alive:       p.alive,
       disconnected: p.disconnected || false,
+      isBot:       p.isBot || false,
       maxBombs:    p.maxBombs,
       fireRange:   p.fireRange,
       speedLevel:  p.speedLevel,
@@ -402,6 +626,7 @@ function broadcastState() {
       x: p.x, y: p.y,
       alive:       p.alive,
       disconnected: p.disconnected || false,
+      isBot:       p.isBot || false,
       speed:       p.speed,
       maxBombs:    p.maxBombs,
       activeBombs: p.activeBombs,
@@ -595,6 +820,19 @@ io.on('connection', (socket) => {
   socket.on('restart-game', () => {
     if (!session || socket.id !== session.hostSocketId) return;
     if (session.phase === 'playing') clearInterval(session.tickInterval);
+
+    // Spieler ohne aktive Socket-Verbindung entfernen (haben das Spiel verlassen)
+    for (const [id, p] of [...session.players]) {
+      if (p.isBot) continue;
+      if (p.disconnected || !io.sockets.sockets.get(id)) {
+        clearTimeout(p.disconnectTimer);
+        session.players.delete(id);
+      }
+    }
+    // Slots neu vergeben
+    let i = 0;
+    for (const [, p] of session.players) { p.slot = i; p.color = COLORS[i]; i++; }
+
     session.phase   = 'lobby';
     session.winner  = null;
     session.grid    = null;
@@ -616,6 +854,51 @@ io.on('connection', (socket) => {
     if (!session) return;
     const player = session.players.get(socket.id);
     if (player && player.alive) player.keys = keys;
+  });
+
+  // ── Admin: kick player/bot ────────────────────────────────────────────────
+  socket.on('kick-player', ({ targetId }) => {
+    if (!session || socket.id !== session.hostSocketId) return;
+    if (session.phase !== 'lobby') return;
+    const player = session.players.get(targetId);
+    if (!player) return;
+    if (!player.isBot) io.to(targetId).emit('kicked');
+    clearTimeout(player.disconnectTimer);
+    session.players.delete(targetId);
+    let i = 0;
+    for (const [, p] of session.players) { p.slot = i; p.color = COLORS[i]; i++; }
+    io.emit('session-updated', sessionInfo());
+  });
+
+  // ── Admin: add bot ─────────────────────────────────────────────────────────
+  socket.on('add-bot', () => {
+    if (!session || socket.id !== session.hostSocketId) return;
+    if (session.phase !== 'lobby') {
+      socket.emit('error-msg', 'Bots können nur in der Lobby hinzugefügt werden.');
+      return;
+    }
+    if (session.players.size >= MAX_PLAYERS) {
+      socket.emit('error-msg', `Session ist voll (max. ${MAX_PLAYERS} Spieler).`);
+      return;
+    }
+    const botNum = [...session.players.values()].filter(p => p.isBot).length + 1;
+    const slot   = session.players.size;
+    const botId  = `bot_${Date.now()}_${slot}`;
+    session.players.set(botId, {
+      socketId: botId,
+      name: `Bot ${botNum}`,
+      slot,
+      color: COLORS[slot],
+      alive: true,
+      x: 0, y: 0, speed: 90,
+      maxBombs: 1, activeBombs: 0,
+      fireRange: 2, speedLevel: 1,
+      lastBombTx: -1, lastBombTy: -1,
+      keys: { left:false, right:false, up:false, down:false, bomb:false },
+      isBot: true,
+      ai: null,
+    });
+    io.emit('session-updated', sessionInfo());
   });
 
   // ── Admin: reclaim host (after page refresh) ───────────────────────────────

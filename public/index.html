@@ -58,6 +58,13 @@ button:not(:disabled):hover { opacity:.85; }
 .player-name { flex:1; font-weight:bold; }
 .player-slot { font-size:11px; color:#8b949e; }
 .error-msg { color:#f85149; font-size:12px; margin-top:8px; }
+.btn-kick {
+  margin-left:auto; font-family:'Courier New',monospace;
+  font-size:11px; padding:2px 8px; border-radius:4px;
+  background:#3d1f1f; color:#f85149; border:1px solid #6e2b2b;
+  cursor:pointer; flex-shrink:0;
+}
+.btn-kick:hover { background:#6e2b2b; }
 .phase-badge {
   font-size:11px; padding:3px 10px; border-radius:10px;
   font-weight:bold; text-transform:uppercase; letter-spacing:0.5px;
@@ -113,6 +120,7 @@ button:not(:disabled):hover { opacity:.85; }
     <div id="error-area"></div>
     <div id="actions" style="margin-top:16px;">
       <button class="btn-primary"   id="btn-start"   disabled>Spiel starten</button>
+      <button class="btn-secondary" id="btn-add-bot" style="display:none">🤖 Bot hinzufügen</button>
       <button class="btn-secondary" id="btn-restart" style="display:none">Neues Spiel (Lobby)</button>
       <button class="btn-danger"    id="btn-close">Session schließen</button>
     </div>
@@ -203,7 +211,8 @@ function updateShareLink(link) {
   const selfJoin = document.getElementById('self-join-link');
   if (link) {
     el.innerHTML = `<a class="link" href="${link}" target="_blank">${link}</a>`;
-    selfJoin.href = link;
+    const sessionId = new URL(link).searchParams.get('session');
+    selfJoin.href = `${window.location.origin}/game.html?session=${sessionId}`;
   } else {
     el.textContent = '–';
   }
@@ -212,16 +221,24 @@ function updateShareLink(link) {
 function updatePlayers(players) {
   document.getElementById('player-count').textContent = players.length;
   const list = document.getElementById('players-list');
+  const canKick = isHost && currentSession && currentSession.phase === 'lobby';
   list.innerHTML = players.length === 0
     ? '<p style="color:#8b949e;font-size:12px;">Noch keine Spieler beigetreten.</p>'
     : players.map(p => `
         <div class="player-entry">
           <div class="player-dot" style="background:${p.color.body}"></div>
-          <div class="player-name">${esc(p.name)}</div>
-          ${p.alive === false ? '<span class="tag">☠️ Tot</span>' : ''}
+          <div class="player-name">${p.isBot ? '🤖 ' : ''}${esc(p.name)}</div>
+          ${p.disconnected ? '<span class="tag">⏳ Getrennt</span>' : ''}
           <span class="player-slot" style="color:${p.color.body}">Spieler ${p.slot + 1}</span>
+          ${canKick ? `<button class="btn-kick" data-id="${esc(p.socketId)}">✕</button>` : ''}
         </div>`).join('');
 }
+
+document.getElementById('players-list').addEventListener('click', e => {
+  const btn = e.target.closest('.btn-kick');
+  if (!btn) return;
+  socket.emit('kick-player', { targetId: btn.dataset.id });
+});
 
 function updatePhase(s) {
   const badge = document.getElementById('phase-badge');
@@ -253,15 +270,20 @@ function updateActions() {
 
   btnClose.style.display = '';
 
+  const btnAddBot = document.getElementById('btn-add-bot');
+
   if (s.phase === 'lobby') {
     btnStart.disabled        = s.players.length === 0;
     btnStart.style.display   = '';
+    btnAddBot.style.display  = '';
     btnRestart.style.display = 'none';
   } else if (s.phase === 'playing') {
     btnStart.style.display   = 'none';
+    btnAddBot.style.display  = 'none';
     btnRestart.style.display = '';
   } else { // ended
     btnStart.style.display   = 'none';
+    btnAddBot.style.display  = 'none';
     btnRestart.style.display = '';
   }
 }
@@ -275,6 +297,10 @@ document.getElementById('btn-create').addEventListener('click', () => {
 
 document.getElementById('btn-start').addEventListener('click', () => {
   socket.emit('start-game');
+});
+
+document.getElementById('btn-add-bot').addEventListener('click', () => {
+  socket.emit('add-bot');
 });
 
 document.getElementById('btn-restart').addEventListener('click', () => {

@@ -218,6 +218,17 @@ socket.on('game-restarted', () => {
   remoteBuffer.clear();
 });
 
+socket.on('kicked', () => {
+  document.getElementById('lobby-panel').style.display = 'none';
+  document.getElementById('game-area').style.display   = 'none';
+  document.getElementById('overlay').style.display     = 'none';
+  document.getElementById('join-panel').style.display  = '';
+  document.getElementById('btn-join').disabled         = false;
+  document.getElementById('name-input').disabled       = false;
+  showJoinError('Du wurdest aus der Session entfernt.');
+  mySlot = null;
+});
+
 // ─── Game state ───────────────────────────────────────────────────────────────
 socket.on('game-state', (state) => {
   const now = performance.now();
@@ -262,7 +273,7 @@ function updateHUD(players) {
     return `<div class="${cls}">
       <div class="hud-dot" style="background:${p.color.body}"></div>
       <div class="hud-player-info">
-        <div class="hud-name">${esc(p.name)}${isMe ? ' ★' : ''}</div>
+        <div class="hud-name">${p.isBot ? '🤖 ' : ''}${esc(p.name)}${isMe ? ' ★' : ''}</div>
         <div class="hud-stats">💣${p.maxBombs} 🔥${p.fireRange} ⚡${p.speedLevel}</div>
       </div>
     </div>`;
